@@ -1,12 +1,13 @@
 # This file define the Oscillator dynamics, reward function and safety property
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 from numpy import linalg as LA
 import math
 import random
 import math
 import gym
-from interval import Interval
+from intervals import FloatInterval as Interval
 
 def main():
     env = Osillator_square()
@@ -20,6 +21,77 @@ def main():
             state = next_state
             if done:
                 break
+
+class OsillatorGpu:
+    deltaT = 0.05
+    u_range = 20
+    max_iteration = 100
+    error = 1e-5
+    x0_low = -2
+    x0_high = 2  
+    x1_low = -2 
+    x1_high = 2
+    def __init__(self, x0=None, x1=None):
+        self.reset(x0, x1)
+
+    def reset(self, x0=None, x1=None):
+        if x0 is None or x1 is None:
+            x0 = torch.rand(1) * (self.x0_high - self.x0_low) + self.x0_low
+            x1 = torch.rand(1) * (self.x0_high - self.x0_low) + self.x0_low
+            # x0 = np.random.uniform(low=self.x0_low, high=self.x0_high, size=1)[0]
+            # x1 = np.random.uniform(low=self.x1_low, high=self.x1_high, size=1)[0]
+            self.x0 = x0
+            self.x1 = x1
+        else:
+            self.x0 = x0
+            self.x1 = x1
+        
+        self.t = 0
+        self.state = torch.cat([self.x0.view(1), self.x1.view(1)]) # shape = (2, 1)
+        self.state.requires_grad = True
+        self.u_last = torch.zeros(1)
+        
+        return self.state
+
+    def step(self, action, smoothness=0.2):
+        u = action * self.u_range
+        u = torch.clamp(u, -20, 20)
+        ORI = True
+        if ORI:
+            disturbance = torch.rand(1) * 0.1 - 0.05
+            x0_tmp = self.state[0] + self.deltaT * self.state[1]
+        else:
+            disturbance = torch.rand(1) * 0.3 - 0.15
+            dist_new = torch.rand(1) * 0.1 - 0.05
+            x0_tmp = self.state[0] + self.deltaT * self.state[1] + dist_new
+
+        x1_tmp = self.state[1] + self.deltaT * ((1 - self.state[0]**2) \
+                                                * self.state[1] - self.state[0] + u) + disturbance
+        self.t = self.t + 1
+        reward = self.design_reward(u, self.u_last, smoothness) # this is numpy
+        self.u_last = u
+        self.state = torch.cat([x0_tmp.view(1), x1_tmp.view(1)])
+        done = self.if_unsafe() or self.t == self.max_iteration
+        return self.state, reward, done
+
+    def design_reward(self, u, u_last, smoothness):
+        r = 0
+        r -= 1 / smoothness * abs(self.state[0].cpu().data)
+        r -= 1 / smoothness * abs(self.state[1].cpu().data)
+        r -= smoothness * abs(u.cpu().item())
+        r -= smoothness * abs(u.cpu().item() - u_last.cpu().item())
+        if self.if_unsafe():
+            r -= 50
+        else:
+            r += 10        
+        return r
+
+    def if_unsafe(self):
+        if self.state[0].cpu().data in Interval((self.x0_low, self.x0_high)) and \
+           self.state[1].cpu().data in Interval((self.x1_low, self.x1_high)):
+            return 0
+        else:
+            return 1
 
 class Osillator:
     deltaT = 0.05
@@ -92,7 +164,8 @@ class Osillator:
         return r
 
     def if_unsafe(self):
-        if self.state[0] in Interval(self.x0_low, self.x0_high) and self.state[1] in Interval(self.x1_low, self.x1_high):
+        if self.state[0] in Interval((self.x0_low, self.x0_high)) and \
+           self.state[1] in Interval((self.x1_low, self.x1_high)):
             return 0
         else:
             return 1
